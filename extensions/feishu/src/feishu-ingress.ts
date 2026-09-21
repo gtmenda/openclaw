@@ -49,6 +49,7 @@ type FeishuIngressOptions = {
   queue?: ChannelIngressQueue<FeishuIngressPayload>;
   pollIntervalMs?: number;
   adoptionStallTimeoutMs?: number;
+  forwardVerifiedEvent?: (envelope: Record<string, unknown>) => Promise<boolean>;
 };
 
 export type FeishuWebhookInvoker = (
@@ -403,6 +404,12 @@ export function createFeishuDurableIngress(options: FeishuIngressOptions): Feish
       };
       activeLifecycles.set(claim.id, wrappedLifecycle);
       try {
+        const envelope = decryptEnvelope(parseRawEnvelope(rawEnvelope), options.encryptKey);
+        const event = isRecord(envelope.event) ? envelope.event : null;
+        const message = event && isRecord(event.message) ? event.message : null;
+        if (message?.chat_type === "p2p" && await options.forwardVerifiedEvent?.(envelope)) {
+          return { kind: "completed" };
+        }
         const result = await options.dispatcher.invoke(parseRawEnvelope(rawEnvelope), {
           needCheck: false,
         });

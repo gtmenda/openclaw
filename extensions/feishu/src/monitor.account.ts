@@ -540,6 +540,35 @@ export async function monitorSingleAccount(params: MonitorSingleAccountParams): 
             dispatcher: eventDispatcher,
             ...(account.encryptKey ? { encryptKey: account.encryptKey } : {}),
             runtime: runtime ?? {},
+            forwardVerifiedEvent: async (envelope) => {
+              if (process.env.FEISHU_DURABLE_ENABLED !== "true") return false;
+              if (account.appId !== process.env.FEISHU_APP_ID) return false;
+              const header = envelope.header as { app_id?: string; tenant_key?: string; event_type?: string } | undefined;
+              if (header?.event_type !== "im.message.receive_v1") return false;
+              if (header.app_id !== account.appId || !process.env.FEISHU_TENANT_ID || header.tenant_key !== process.env.FEISHU_TENANT_ID) {
+                throw new Error("Feishu ingress account mismatch");
+              }
+              const token = process.env.FEISHU_INGRESS_INTERNAL_TOKEN;
+              const endpoint = process.env.FEISHU_INGRESS_INTERNAL_URL;
+              if (!token?.trim() || token === process.env.OPENCLAW_GATEWAY_TOKEN || !endpoint) {
+                throw new Error("Dedicated Feishu ingress configuration required");
+              }
+              const target = new URL(endpoint);
+              if (!["http:", "https:"].includes(target.protocol) || target.username || target.password) {
+                throw new Error("Invalid Feishu ingress endpoint");
+              }
+              const response = await fetch(target, {
+                method: "POST",
+                headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+                body: JSON.stringify(envelope),
+                redirect: "error",
+                signal: AbortSignal.timeout(15000),
+              });
+              if (response.status !== 202) throw new Error("Feishu ingress handoff failed");
+              const receipt = await response.json() as { inbox_id?: string; status?: string };
+              if (!receipt.inbox_id || receipt.status !== "accepted") throw new Error("Invalid Feishu ingress receipt");
+              return true;
+            },
           })
         : undefined;
     const durableEventDispatcher = durableIngress
